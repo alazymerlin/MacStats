@@ -1,0 +1,14 @@
+# Xcode
+*.xcworkspace
+xcuserdata/
+DerivedData/
+.build/
+build/
+*.app
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+*.swp
+*.lock

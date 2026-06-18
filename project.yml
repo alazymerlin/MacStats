@@ -1,0 +1,21 @@
+name: MacStats
+options:
+  bundleIdPrefix: com.macstats
+  deploymentTarget:
+    macOS: "14.0"
+
+settings:
+  SWIFT_VERSION: "5.9"
+  CODE_SIGN_STYLE: Automatic
+  APPLICATION_EXTENSION_API_ONLY: false
+
+targets:
+  MacStats:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/MacStats
+    info:
+      path: Sources/MacStats/Info.plist
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.macstats.app
