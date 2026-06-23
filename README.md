@@ -15,13 +15,17 @@ A lightweight macOS menu bar system monitor — CPU, memory, GPU, network, disk,
 
 ### Features
 
-- **Real-time CPU usage** with progress bar
-- **Memory usage** with progress bar
+- **Real-time CPU usage** with progress bar + sparkline trend chart
+- **Memory usage** with progress bar + sparkline trend chart
 - **GPU model** display
 - **Network speed** — real-time upload & download
 - **IP address** — local & public
 - **Disk** free space & usage
 - **Battery** cycle count, health & charging status
+- **Top processes** — which apps are eating your CPU & memory
+- **Configurable refresh interval** — 0.5s to 10s
+- **Customizable menu bar icon** — CPU, memory, or network
+- **Danger zone alerts** — visual threshold lines on charts
 
 ### Requirements
 
@@ -46,10 +50,11 @@ cp -R .build/release/MacStats.app /Applications/
 | Action | Description |
 |---|---|
 | Click menu bar CPU icon | Toggle panel |
-| Click "Settings ▼" | Expand options (show CPU %) |
+| Click "Processes" | Show top CPU-consuming processes |
+| Click "Settings ▼" | Expand options: menu bar icon, refresh interval, CPU % display |
 | Click "Quit" | Exit the app |
 
-Data refreshes every **2 seconds**; public IP refreshes every **2 minutes**.
+Data refreshes at your chosen interval (default **2 seconds**); public IP refreshes every **2 minutes**.
 
 ### Tech Stack
 
@@ -84,13 +89,17 @@ macOS 菜单栏系统监控工具 — CPU、内存、GPU、网络、磁盘、电
 
 ### 功能
 
-- **CPU 实时使用率** + 进度条
-- **内存用量 / 总量** + 进度条
+- **CPU 实时使用率** + 进度条 + 趋势折线图
+- **内存用量 / 总量** + 进度条 + 趋势折线图
 - **GPU 型号**显示
 - **网络上行/下行**实时速度
 - **内网 IP + 公网 IP**
 - **磁盘**剩余容量 + 使用率
 - **电池**循环次数 + 健康度 + 充电状态
+- **进程列表** — 实时查看 CPU/内存占用最高的进程
+- **刷新间隔可调** — 0.5s ~ 10s
+- **菜单栏图标自定义** — CPU / 内存 / 网络
+- **警戒线提示** — 超过阈值一目了然
 
 ### 环境要求
 
@@ -115,10 +124,11 @@ cp -R .build/release/MacStats.app /Applications/
 | 操作 | 说明 |
 |---|---|
 | 点击菜单栏 CPU 图标 | 展开 / 收起面板 |
-| 点击「设置 ▼」 | 展开选项（显示 CPU 百分比等） |
+| 点击「进程」 | 显示 CPU 占用最高的进程 |
+| 点击「设置 ▼」 | 展开选项：菜单栏图标、刷新间隔、CPU 百分比 |
 | 点击「退出」 | 关闭应用 |
 
-所有数据每 **2 秒** 自动刷新一次，公网 IP 每 **2 分钟** 刷新一次。
+所有数据按设定间隔自动刷新（默认 **2 秒**），公网 IP 每 **2 分钟** 刷新一次。
 
 ### 技术栈
 
