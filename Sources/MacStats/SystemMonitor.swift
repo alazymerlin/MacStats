@@ -1,11 +1,10 @@
  import Foundation
  import IOKit
  import IOKit.ps
- import MachO
  import Metal
- 
+
  // MARK: - Models
- 
+
  struct MemoryUsage {
      let used: UInt64
      let total: UInt64
@@ -13,7 +12,7 @@
          total > 0 ? Double(used) / Double(total) * 100 : 0
      }
  }
- 
+
  struct DiskInfo {
      let free: Int64
      let total: Int64
@@ -21,7 +20,7 @@
          total > 0 ? Double(total - free) / Double(total) * 100 : 0
      }
  }
- 
+
  struct BatteryInfo {
      let cycleCount: Int
      let healthPercent: Int
@@ -32,15 +31,15 @@
          maxCapacity > 0 ? Int(Double(currentCapacity) / Double(maxCapacity) * 100) : 0
      }
  }
- 
+
  struct GPUInfo {
      let name: String
      let utilization: Double?
      let memoryUsed: UInt64?
      let memoryTotal: UInt64?
  }
- 
- 
+
+
 struct WidgetStats: Codable {
     let cpuUsage: Double
     let memoryPercent: Double
@@ -59,8 +58,34 @@ struct WidgetStats: Codable {
     let hasBattery: Bool
 }
 
+// MARK: - Top Process
+
+struct TopProcess: Identifiable {
+    let id: pid_t
+    let name: String
+    let cpuUsage: Double
+    let memoryBytes: UInt64
+
+    var cpuFormatted: String {
+        String(format: "%.1f%%", cpuUsage)
+    }
+
+    var memoryFormatted: String {
+        Self.formatBytesStatic(Int64(memoryBytes))
+    }
+
+    private static func formatBytesStatic(_ value: Int64) -> String {
+        let absVal = abs(value)
+        let units = ["B", "KB", "MB", "GB"]
+        var v = Double(absVal)
+        var u = 0
+        while v >= 1024 && u < units.count - 1 { v /= 1024; u += 1 }
+        return String(format: "%.1f %@", v, units[u])
+    }
+}
+
 // MARK: - SystemMonitor
- 
+
  @MainActor
  final class SystemMonitor: ObservableObject {
      @Published var cpuUsage: Double = 0
@@ -73,40 +98,59 @@ struct WidgetStats: Codable {
      @Published var disk: DiskInfo = .init(free: 0, total: 0)
      @Published var battery: BatteryInfo = .init(cycleCount: 0, healthPercent: 100, isCharging: false, currentCapacity: 0, maxCapacity: 0)
      @Published var hasBattery: Bool = true
- 
+     @Published var topProcesses: [TopProcess] = []
+     @Published var cpuHistory: [Double] = []
+     @Published var memoryHistory: [Double] = []
+
      // Delta tracking
      private var prevCPULoad: host_cpu_load_info?
      private var prevNetwork: (rx: UInt64, tx: UInt64)?
- 
+     private var prevProcessCPUTimes: [pid_t: UInt64] = [:]
+
      private var updateTimer: Timer?
      private let pageSize: UInt64 = {
          UInt64(vm_kernel_page_size)
      }()
- 
+
      private let ipRefreshInterval: TimeInterval = 120
      private var lastPublicIPFetch: Date = .distantPast
- 
+     private var widgetWriteTick = 0
+     private var _refreshInterval: TimeInterval = 2.0
+     private let historyLength = 30
+
      init() {
+         // Load saved refresh interval from UserDefaults
+        _refreshInterval = UserDefaults.standard.double(forKey: "refreshInterval")
+        if _refreshInterval < 0.5 { _refreshInterval = 2.0 }
+
+        checkBatteryWithPMSet()
         fetchGPUDeviceInfo()
          startMonitoring()
      }
- 
+
      deinit {
          updateTimer?.invalidate()
      }
- 
+
+     // MARK: - Refresh Interval
+
+     func updateRefreshInterval(_ interval: Double) {
+         _refreshInterval = max(0.5, interval)
+         startMonitoring()
+     }
+
      // MARK: - Timer
- 
+
      func startMonitoring() {
          updateTimer?.invalidate()
          updateOnce()
-         updateTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+         updateTimer = Timer.scheduledTimer(withTimeInterval: _refreshInterval, repeats: true) { [weak self] _ in
              Task { @MainActor in
                  self?.updateOnce()
              }
          }
      }
- 
+
      func updateOnce() {
          cpuUsage = readCPUUsage()
          memory = readMemoryUsage()
@@ -116,14 +160,26 @@ struct WidgetStats: Codable {
          localIP = readLocalIP()
          disk = readDiskSpace()
          battery = readBatteryInfo()
+         topProcesses = readTopProcesses()
+
+         // Record sparkline history
+         cpuHistory.append(cpuUsage)
+         if cpuHistory.count > historyLength { cpuHistory.removeFirst() }
+         memoryHistory.append(memory.percent)
+         if memoryHistory.count > historyLength { memoryHistory.removeFirst() }
+
          if Date().timeIntervalSince(lastPublicIPFetch) > ipRefreshInterval {
              Task { await fetchPublicIP() }
          }
-         writeWidgetStats()
+         widgetWriteTick += 1
+         if widgetWriteTick >= 5 {
+             widgetWriteTick = 0
+             writeWidgetStats()
+         }
      }
- 
+
      // MARK: - CPU
- 
+
      private func readCPUUsage() -> Double {
          var load = host_cpu_load_info()
          var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
@@ -133,35 +189,35 @@ struct WidgetStats: Codable {
              }
          }
          guard kr == KERN_SUCCESS else { return 0 }
- 
+
          let user   = UInt64(load.cpu_ticks.0)
          let system = UInt64(load.cpu_ticks.1)
          let idle   = UInt64(load.cpu_ticks.2)
          let nice   = UInt64(load.cpu_ticks.3)
          let total  = user + system + idle + nice
- 
+
          guard let prev = prevCPULoad else {
              prevCPULoad = load
              return 0
          }
- 
+
          let prevUser   = UInt64(prev.cpu_ticks.0)
          let prevSystem = UInt64(prev.cpu_ticks.1)
          let prevIdle   = UInt64(prev.cpu_ticks.2)
          let prevNice   = UInt64(prev.cpu_ticks.3)
          let prevTotal  = prevUser + prevSystem + prevIdle + prevNice
- 
+
          prevCPULoad = load
- 
+
          let totalDelta = total - prevTotal
          let idleDelta  = idle - prevIdle
          guard totalDelta > 0 else { return 0 }
- 
+
          return Double(totalDelta - idleDelta) / Double(totalDelta) * 100.0
      }
- 
+
      // MARK: - Memory
- 
+
      private func readMemoryUsage() -> MemoryUsage {
          var stats = vm_statistics64()
          var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
@@ -173,14 +229,14 @@ struct WidgetStats: Codable {
          guard kr == KERN_SUCCESS else {
              return MemoryUsage(used: 0, total: 0)
          }
- 
-         let used = UInt64(stats.active_count + stats.wire_count) * pageSize
+
+         let used = UInt64(stats.active_count + stats.wire_count + stats.compressor_page_count) * pageSize
          let total = ProcessInfo.processInfo.physicalMemory
          return MemoryUsage(used: used, total: total)
      }
- 
+
      // MARK: - GPU
- 
+
      private func fetchGPUDeviceInfo() {
          if let device = MTLCreateSystemDefaultDevice() {
              let name = device.name
@@ -191,7 +247,7 @@ struct WidgetStats: Codable {
              gpu = GPUInfo(name: name, utilization: util, memoryUsed: nil, memoryTotal: totalMem)
          }
      }
- 
+
      private func readGPUUtilization() -> Double? {
          let matching = IOServiceMatching("AGXAccelerator")
          var iterator: io_iterator_t = 0
@@ -199,7 +255,7 @@ struct WidgetStats: Codable {
              return nil
          }
          defer { IOObjectRelease(iterator) }
- 
+
          var result: Double?
          var entry = IOIteratorNext(iterator)
          while entry != 0 {
@@ -223,17 +279,17 @@ struct WidgetStats: Codable {
          }
          return result
      }
- 
+
      // MARK: - Network Speed
- 
+
      private func readNetworkSpeed() -> (upload: Double, download: Double) {
          var ifaddr: UnsafeMutablePointer<ifaddrs>?
          guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return (0, 0) }
          defer { freeifaddrs(ifaddr) }
- 
+
          var totalRX: UInt64 = 0
          var totalTX: UInt64 = 0
- 
+
          var ptr = first
          repeat {
              let flags = ptr.pointee.ifa_flags
@@ -247,24 +303,26 @@ struct WidgetStats: Codable {
              guard let next = ptr.pointee.ifa_next else { break }
              ptr = next
          } while true
- 
+
          guard let prev = prevNetwork, totalRX >= prev.rx, totalTX >= prev.tx else {
              prevNetwork = (totalRX, totalTX)
              return (0, 0)
          }
+
+         let interval = _refreshInterval
+         let upload = Double(totalTX - prev.tx) / interval
+         let download = Double(totalRX - prev.rx) / interval
          prevNetwork = (totalRX, totalTX)
- 
-         let interval: TimeInterval = 2.0
-         return (Double(totalTX - prev.tx) / interval, Double(totalRX - prev.rx) / interval)
+         return (upload, download)
      }
- 
+
      // MARK: - IP Address
- 
+
      private func readLocalIP() -> String {
          var ifaddr: UnsafeMutablePointer<ifaddrs>?
          guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return "N/A" }
          defer { freeifaddrs(ifaddr) }
- 
+
          var ptr = first
          repeat {
              let flags = ptr.pointee.ifa_flags
@@ -286,7 +344,7 @@ struct WidgetStats: Codable {
          } while true
          return "N/A"
      }
- 
+
      private func fetchPublicIP() async {
          guard let url = URL(string: "https://api.ipify.org") else { return }
          lastPublicIPFetch = Date()
@@ -297,9 +355,9 @@ struct WidgetStats: Codable {
              publicIP = "获取失败"
          }
      }
- 
+
      // MARK: - Disk
- 
+
      private func readDiskSpace() -> DiskInfo {
          let path = "/"
          do {
@@ -311,9 +369,9 @@ struct WidgetStats: Codable {
              return DiskInfo(free: 0, total: 0)
          }
      }
- 
+
      // MARK: - Battery
- 
+
     private func readBatteryInfo() -> BatteryInfo {
         // hasBattery is already set by checkBatteryWithPMSet() in init
         guard hasBattery else {
@@ -340,11 +398,18 @@ struct WidgetStats: Codable {
         let cycleCount  = dict["CycleCount"]          as? Int ?? 0
         let isCharging  = dict["Is Charging"]          as? Bool ?? false
         let currentRaw  = dict["AppleRawCurrentCapacity"] as? Int ?? 0
-        let maxCapRatio = dict["MaxCapacity"]          as? Int
-        let health = max(0, min(100, maxCapRatio ?? 100))
+        let maxCapRaw   = dict["AppleRawMaxCapacity"]       as? Int ?? 1
+        let designCap   = dict["DesignCapacity"]            as? Int
+        // health = current max capacity / original design capacity
+        let health: Int
+        if let design = designCap, design > 0 {
+            health = max(0, min(100, Int(Double(maxCapRaw) / Double(design) * 100)))
+        } else {
+            health = 100
+        }
 
         return BatteryInfo(cycleCount: cycleCount, healthPercent: health, isCharging: isCharging,
-                          currentCapacity: currentRaw, maxCapacity: currentRaw)
+                          currentCapacity: currentRaw, maxCapacity: maxCapRaw)
     }
 
     private func checkBatteryWithPMSet() {
@@ -366,15 +431,63 @@ struct WidgetStats: Codable {
             // Keep default hasBattery = true
         }
     }
- 
+
+    // MARK: - Top Processes
+
+    private func readTopProcesses() -> [TopProcess] {
+        let pidCount = proc_listallpids(nil, 0)
+        guard pidCount > 0 else { return [] }
+
+        var pids = [pid_t](repeating: 0, count: Int(pidCount))
+        let ret = pids.withUnsafeMutableBufferPointer { ptr in
+            proc_listallpids(ptr.baseAddress, Int32(MemoryLayout<pid_t>.size * ptr.count))
+        }
+        guard ret > 0 else { return [] }
+
+        let activeCount = Int(ret)
+        var processes: [TopProcess] = []
+
+        for i in 0..<activeCount {
+            let pid = pids[i]
+            guard pid > 0 else { continue }
+
+            // Skip kernel and launchd
+            if pid == 0 || pid == 1 { continue }
+
+            // Get process name
+            var nameBuffer = [CChar](repeating: 0, count: 1024)
+            proc_name(pid, &nameBuffer, UInt32(nameBuffer.count))
+            let name = String(cString: nameBuffer).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+
+            // Get process task info for CPU and memory
+            var taskInfo = proc_taskinfo()
+            let size = MemoryLayout<proc_taskinfo>.size
+            let retSize = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(size))
+            guard retSize == size else { continue }
+
+            let memoryBytes = taskInfo.pti_resident_size
+
+            // CPU: total user+system time in nanoseconds
+            let cpuTime = taskInfo.pti_total_user + taskInfo.pti_total_system
+            let prevTime = prevProcessCPUTimes[pid] ?? cpuTime
+            prevProcessCPUTimes[pid] = cpuTime
+
+            let cpuDelta = cpuTime > prevTime ? Double(cpuTime - prevTime) : 0
+            let intervalNs = _refreshInterval * 1_000_000_000
+            let cpuPct = intervalNs > 0 ? (cpuDelta / intervalNs) * 100.0 : 0
+
+            processes.append(TopProcess(id: pid, name: name, cpuUsage: cpuPct, memoryBytes: memoryBytes))
+        }
+
+        // Sort by CPU descending, take top 8
+        processes.sort { $0.cpuUsage > $1.cpuUsage }
+        return Array(processes.prefix(8))
+    }
 
      // MARK: - Widget Shared Data
 
     private func writeWidgetStats() {
-        var appCache = FileManager.default.homeDirectoryForCurrentUser
-        appCache.appendPathComponent("Library/Caches/com.macstats")
-        try? FileManager.default.createDirectory(at: appCache, withIntermediateDirectories: true)
-        let url = appCache.appendingPathComponent("stats.json")
         let stats = WidgetStats(
             cpuUsage: cpuUsage,
             memoryPercent: memory.percent,
@@ -392,12 +505,18 @@ struct WidgetStats: Codable {
             batteryCharging: battery.isCharging,
             hasBattery: hasBattery
         )
-        guard let data = try? JSONEncoder().encode(stats) else { return }
-        try? data.write(to: url, options: .atomic)
+        Task.detached(priority: .background) {
+            var appCache = FileManager.default.homeDirectoryForCurrentUser
+            appCache.appendPathComponent("Library/Caches/com.macstats")
+            try? FileManager.default.createDirectory(at: appCache, withIntermediateDirectories: true)
+            let url = appCache.appendingPathComponent("stats.json")
+            guard let data = try? JSONEncoder().encode(stats) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
      // MARK: - Helpers
- 
+
      func formatBytes(_ value: Int64) -> String {
          let absVal = abs(value)
          let units = ["B", "KB", "MB", "GB", "TB"]
@@ -406,11 +525,11 @@ struct WidgetStats: Codable {
          while v >= 1024 && u < units.count - 1 { v /= 1024; u += 1 }
          return String(format: "%.1f %@", v, units[u])
      }
- 
+
      func formatBytes(_ value: UInt64) -> String {
          formatBytes(Int64(value))
      }
- 
+
      func formatSpeed(_ bytesPerSec: Double) -> String {
          let absVal = abs(bytesPerSec)
          if absVal < 1024 { return String(format: "%.0f B/s", absVal) }
@@ -418,31 +537,35 @@ struct WidgetStats: Codable {
          if absVal < 1024 * 1024 * 1024 { return String(format: "%.1f MB/s", absVal / (1024 * 1024)) }
          return String(format: "%.2f GB/s", absVal / (1024 * 1024 * 1024))
      }
- 
+
      var cpuUsageFormatted: String {
          String(format: "%.1f%%", cpuUsage)
      }
- 
+
      var memoryFormatted: String {
          "\(formatBytes(memory.used)) / \(formatBytes(memory.total))"
      }
- 
+
      var memoryPercentFormatted: String {
          String(format: "%.1f%%", memory.percent)
      }
- 
+
      var diskFormatted: String {
          "\(formatBytes(disk.free)) / \(formatBytes(disk.total))"
      }
- 
+
      var diskPercentFormatted: String {
          String(format: "%.1f%%", disk.usedPercent)
      }
- 
+
      var networkFormatted: String {
          "↑ \(formatSpeed(uploadSpeed))  ↓ \(formatSpeed(downloadSpeed))"
      }
- 
+
+    var networkCompactFormatted: String {
+        "↑\(formatSpeed(uploadSpeed)) ↓\(formatSpeed(downloadSpeed))"
+    }
+
      var batterySummary: String {
          guard hasBattery else { return "无电池" }
          let charge = battery.isCharging ? "⚡充电中" : "🔋"
